@@ -71,7 +71,9 @@ def run_pipeline():
     plt.title('Cross-Dataset Model Validation (CHI3L2 Biomarker Panel)')
     plt.legend(loc="lower right")
     plt.tight_layout()
+    plt.savefig("figures/roc_curve_csf.png", dpi=300)
     plt.savefig("figures/cross_validation_roc.png", dpi=300)
+
     plt.close()
 
     print("Pipeline execution complete. Plots saved in figures/ directory.")

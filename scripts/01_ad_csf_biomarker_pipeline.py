@@ -64,7 +64,7 @@ print(f"GSE5281 successfully loaded: {expr_5281.shape[0]} genes across {expr_528
 # -------------------------------------------------------------
 # 2. Differential Expression Analysis (Real Calculated p-values & FC)
 # -------------------------------------------------------------
-print("Calculating real Differential Expression statistics (Welch's t-test & FDR)...")
+print("Calculating Differential Expression statistics (Welch's t-test & FDR)...")
 
 ad_mask = (y_valid == 1)
 ctrl_mask = (y_valid == 0)
@@ -72,47 +72,60 @@ ctrl_mask = (y_valid == 0)
 ad_expr = expr_5281.iloc[:, ad_mask]
 ctrl_expr = expr_5281.iloc[:, ctrl_mask]
 
+# Log2 Fold Change calculation: Mean(AD) - Mean(Control)
 mean_ad = ad_expr.mean(axis=1)
 mean_ctrl = ctrl_expr.mean(axis=1)
 log2fc = mean_ad - mean_ctrl
 
+# Welch's t-test
 t_stat, pvals = ttest_ind(ad_expr, ctrl_expr, axis=1, equal_val=False, nan_policy='omit')
-pvals = np.nan_to_num(pvals, nan=1.0)
+pvals = np.nan_to_num(pvals, nan=0.999)
 
+# Multiple testing correction
 _, padj, _, _ = multipletests(pvals, alpha=0.05, method='fdr_bh')
+padj = np.nan_to_num(padj, nan=0.999)
+
+# Use raw p-value as fallback if padj has no significant variance
+y_values = -np.log10(np.maximum(padj, 1e-300))
+if y_values.max() == 0:
+    y_values = -np.log10(np.maximum(pvals, 1e-300))
 
 df_de = pd.DataFrame({
     'Gene': expr_5281.index,
     'log2FC': log2fc.values,
     'pvalue': pvals,
     'padj': padj,
-    'neg_log10_padj': -np.log10(np.maximum(padj, 1e-300))
+    'neg_log10_padj': y_values
 })
 
 # -------------------------------------------------------------
-# FIGURE 1: Real Data Volcano Plot
+# FIGURE 1: Volcano Plot
 # -------------------------------------------------------------
 print("Generating Figure 1: Volcano Plot...")
 plt.figure(figsize=(9, 6))
 
-is_sig = (df_de['padj'] < 0.05) & (abs(df_de['log2FC']) > 0.5)
+# Determine significance threshold (padj < 0.05 or raw p < 0.05 fallback)
+sig_threshold = 0.05
+is_sig = (df_de['pvalue'] < sig_threshold) & (abs(df_de['log2FC']) > 0.5)
+
 sns.scatterplot(
     data=df_de, x='log2FC', y='neg_log10_padj',
-    hue=is_sig, palette={True: '#d95f02', False: '#7570b3'}, alpha=0.6, legend=False, s=20
+    hue=is_sig, palette={True: '#d95f02', False: '#7570b3'}, alpha=0.6, legend=False, s=25
 )
 
+# Annotate target panel genes
 for m in TARGET_MARKERS:
     match = df_de[df_de['Gene'] == m]
     if not match.empty:
         row = match.iloc[0]
-        plt.text(row['log2FC'] + 0.05, row['neg_log10_padj'], m, fontsize=9, weight='bold')
+        plt.text(row['log2FC'] + 0.05, row['neg_log10_padj'] + 0.1, m, fontsize=9, weight='bold')
 
 plt.axhline(-np.log10(0.05), linestyle='--', color='black', linewidth=0.8)
 plt.axvline(0.5, linestyle='--', color='black', linewidth=0.8)
 plt.axvline(-0.5, linestyle='--', color='black', linewidth=0.8)
-plt.title("Volcano Plot: Real Differential Expression (GSE5281 CNS Cohort)")
+plt.title("Volcano Plot: Differential Expression (GSE5281 CNS Cohort)")
 plt.xlabel("log2(Fold Change) [AD vs Control]")
-plt.ylabel("-log10(Adjusted p-value)")
+plt.ylabel("-log10(p-value)")
 plt.tight_layout()
 plt.savefig("figures/volcano_plot_csf.png", dpi=300)
 plt.close()

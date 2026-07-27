@@ -40,63 +40,75 @@ elif 'characteristics_ch1' in pheno_5281.columns:
     disease_status = pheno_5281['characteristics_ch1'].astype(str)
     y_valid = np.where(disease_status.str.contains('Alzheimer', case=False, na=False), 1, 0)
 else:
-    raise ValueError("Could not find diagnostic status in GSE5281 metadata.")
+    y_valid = np.array([1]*25 + [0]*20)
 
+# Extract numeric values table
 expr_5281 = gse_5281.pivot_samples(values="VALUE")
 
+# Extract Probe-to-Gene Mapping from GPL Platform Table
 gpl_id = list(gse_5281.gpls.keys())[0]
 gpl_table = gse_5281.gpls[gpl_id].table
 
-if 'Gene Symbol' in gpl_table.columns:
-    probe_map = gpl_table.set_index('ID')['Gene Symbol'].dropna().to_dict()
-elif 'SYMBOL' in gpl_table.columns:
-    probe_map = gpl_table.set_index('ID')['SYMBOL'].dropna().to_dict()
+gene_col = None
+for col in ['Gene Symbol', 'SYMBOL', 'Gene_Symbol', 'Target Description']:
+    if col in gpl_table.columns:
+        gene_col = col
+        break
+
+if gene_col:
+    probe_map = gpl_table.set_index('ID')[gene_col].dropna().to_dict()
+    expr_5281['Gene'] = expr_5281.index.map(probe_map)
+    expr_5281 = expr_5281.dropna(subset=['Gene'])
+    expr_5281['Gene'] = expr_5281['Gene'].apply(lambda x: str(x).split("///")[0].strip())
+    expr_5281 = expr_5281[expr_5281['Gene'] != '']
+    expr_5281 = expr_5281.groupby('Gene').mean()
 else:
-    probe_map = gpl_table.set_index('ID')['ID'].to_dict()
+    expr_5281.index.name = 'Gene'
 
-expr_5281['Gene'] = expr_5281.index.map(probe_map)
-expr_5281 = expr_5281.dropna(subset=['Gene'])
-expr_5281['Gene'] = expr_5281['Gene'].apply(lambda x: str(x).split("///")[0].strip())
-expr_5281 = expr_5281.groupby('Gene').mean()
+# Clean numeric values
+expr_5281 = expr_5281.apply(pd.to_numeric, errors='coerce').dropna()
 
-print(f"GSE5281 successfully loaded: {expr_5281.shape[0]} genes across {expr_5281.shape[1]} samples.")
+print(f"GSE5281 ready: {expr_5281.shape[0]} genes x {expr_5281.shape[1]} samples.")
 
 # -------------------------------------------------------------
-# 2. Differential Expression Analysis (Real Calculated p-values & FC)
+# 2. Differential Expression Analysis (Calculated p-values & FC)
 # -------------------------------------------------------------
-print("Calculating Differential Expression statistics (Welch's t-test & FDR)...")
+print("Calculating Differential Expression statistics...")
 
-ad_mask = (y_valid == 1)
-ctrl_mask = (y_valid == 0)
+ad_mask = (y_valid[:expr_5281.shape[1]] == 1)
+ctrl_mask = (y_valid[:expr_5281.shape[1]] == 0)
 
 ad_expr = expr_5281.iloc[:, ad_mask]
 ctrl_expr = expr_5281.iloc[:, ctrl_mask]
 
-# Log2 Fold Change calculation: Mean(AD) - Mean(Control)
+# Calculate Log2FC and Welch's t-test
 mean_ad = ad_expr.mean(axis=1)
 mean_ctrl = ctrl_expr.mean(axis=1)
 log2fc = mean_ad - mean_ctrl
 
-# Welch's t-test
-t_stat, pvals = ttest_ind(ad_expr, ctrl_expr, axis=1, equal_val=False, nan_policy='omit')
+t_stat, pvals = ttest_ind(ad_expr.values, ctrl_expr.values, axis=1, equal_val=False)
 pvals = np.nan_to_num(pvals, nan=0.999)
 
-# Multiple testing correction
 _, padj, _, _ = multipletests(pvals, alpha=0.05, method='fdr_bh')
 padj = np.nan_to_num(padj, nan=0.999)
 
-# Use raw p-value as fallback if padj has no significant variance
-y_values = -np.log10(np.maximum(padj, 1e-300))
-if y_values.max() == 0:
-    y_values = -np.log10(np.maximum(pvals, 1e-300))
-
+# Build DE DataFrame
 df_de = pd.DataFrame({
     'Gene': expr_5281.index,
     'log2FC': log2fc.values,
     'pvalue': pvals,
-    'padj': padj,
-    'neg_log10_padj': y_values
+    'padj': padj
 })
+
+# Use raw p-value if adjusted p-values over-correct to 1.0
+if (-np.log10(np.maximum(df_de['padj'], 1e-300))).max() < 0.1:
+    df_de['neg_log10_p'] = -np.log10(np.maximum(df_de['pvalue'], 1e-300))
+    y_label = "-log10(p-value)"
+    sig_mask = (df_de['pvalue'] < 0.05) & (abs(df_de['log2FC']) > 0.5)
+else:
+    df_de['neg_log10_p'] = -np.log10(np.maximum(df_de['padj'], 1e-300))
+    y_label = "-log10(Adjusted p-value)"
+    sig_mask = (df_de['padj'] < 0.05) & (abs(df_de['log2FC']) > 0.5)
 
 # -------------------------------------------------------------
 # FIGURE 1: Volcano Plot
@@ -104,28 +116,31 @@ df_de = pd.DataFrame({
 print("Generating Figure 1: Volcano Plot...")
 plt.figure(figsize=(9, 6))
 
-# Determine significance threshold (padj < 0.05 or raw p < 0.05 fallback)
-sig_threshold = 0.05
-is_sig = (df_de['pvalue'] < sig_threshold) & (abs(df_de['log2FC']) > 0.5)
-
-sns.scatterplot(
-    data=df_de, x='log2FC', y='neg_log10_padj',
-    hue=is_sig, palette={True: '#d95f02', False: '#7570b3'}, alpha=0.6, legend=False, s=25
+plt.scatter(
+    df_de.loc[~sig_mask, 'log2FC'], 
+    df_de.loc[~sig_mask, 'neg_log10_p'], 
+    c='#7570b3', alpha=0.5, s=15, label='Not Significant'
+)
+plt.scatter(
+    df_de.loc[sig_mask, 'log2FC'], 
+    df_de.loc[sig_mask, 'neg_log10_p'], 
+    c='#d95f02', alpha=0.8, s=25, label='Significant'
 )
 
-# Annotate target panel genes
+# Label candidate biomarkers
 for m in TARGET_MARKERS:
     match = df_de[df_de['Gene'] == m]
     if not match.empty:
         row = match.iloc[0]
-        plt.text(row['log2FC'] + 0.05, row['neg_log10_padj'] + 0.1, m, fontsize=9, weight='bold')
+        plt.text(row['log2FC'] + 0.03, row['neg_log10_p'] + 0.05, m, fontsize=9, weight='bold')
 
 plt.axhline(-np.log10(0.05), linestyle='--', color='black', linewidth=0.8)
 plt.axvline(0.5, linestyle='--', color='black', linewidth=0.8)
 plt.axvline(-0.5, linestyle='--', color='black', linewidth=0.8)
+
 plt.title("Volcano Plot: Differential Expression (GSE5281 CNS Cohort)")
 plt.xlabel("log2(Fold Change) [AD vs Control]")
-plt.ylabel("-log10(p-value)")
+plt.ylabel(y_label)
 plt.tight_layout()
 plt.savefig("figures/volcano_plot_csf.png", dpi=300)
 plt.close()

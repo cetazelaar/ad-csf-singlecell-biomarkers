@@ -222,3 +222,5 @@ data/*.gz
 data/*.txt
 data/
 __pycache__/
+data/
+__pycache__/

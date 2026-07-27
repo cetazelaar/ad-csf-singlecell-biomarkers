@@ -220,3 +220,5 @@ data/*.gz
 data/*.txt
 data/*.gz
 data/*.txt
+data/
+__pycache__/
